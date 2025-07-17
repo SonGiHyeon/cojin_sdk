@@ -1,3 +1,5 @@
+// FaucetTracker.sol
+
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
@@ -91,5 +93,9 @@ contract FaucetTracker {
             "Too soon to request again"
         );
         return true;
+    }
+
+    function getLastReceived(address user) external view returns (uint256) {
+        return records[user].lastReceivedAt;
     }
 }
