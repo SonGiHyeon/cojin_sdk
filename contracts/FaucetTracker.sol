@@ -2,23 +2,22 @@
 pragma solidity ^0.8.20;
 
 contract FaucetTracker {
-    struct FaucetInfo {
-        bool isReceive;
-        bool isAdminReceive;
-        uint256 lastReceivedAt;
-    }
-
-    mapping(address => FaucetInfo) public records;
     address public owner;
 
-    // ✅ 테스트 모드 플래그
+    /// @notice 사용자별 어드민 수령 여부
+    mapping(address => bool) public isAdminReceive;
+
+    /// @notice 사용자별 유저 수령 여부
+    mapping(address => bool) public isReceive;
+
+    /// ✅ 사용자별 체인별 마지막 수령 시간
+    mapping(address => mapping(string => uint256)) public lastReceivedAt;
+
+    uint256 public cooldown = 1 days;
     bool public testingMode = false;
 
-    // ✅ 쿨다운 시간 (기본: 1일)
-    uint256 public cooldown = 1 days;
-
     modifier onlyOwner() {
-        require(msg.sender == owner, "NOT_OWNER");
+        require(msg.sender == owner, "ONLY_OWNER");
         _;
     }
 
@@ -26,70 +25,57 @@ contract FaucetTracker {
         owner = msg.sender;
     }
 
-    // ✅ 테스트 모드 ON/OFF (only owner)
+    /// @notice 유저가 어드민으로부터 받은 경우 기록
+    function setAdminReceived(
+        address user,
+        string calldata chain
+    ) external onlyOwner {
+        isAdminReceive[user] = true;
+        lastReceivedAt[user][chain] = block.timestamp;
+    }
+
+    /// @notice 유저가 faucet에서 받은 경우 기록
+    function setUserReceived(
+        address user,
+        string calldata chain
+    ) external onlyOwner {
+        isReceive[user] = true;
+        lastReceivedAt[user][chain] = block.timestamp;
+    }
+
+    /// @notice 테스트 모드 설정
     function setTestingMode(bool mode) external onlyOwner {
         testingMode = mode;
     }
 
-    // ✅ 쿨다운 시간 조절 (테스트시 60초 등으로 설정 가능)
+    /// @notice 쿨다운 시간 설정 (초 단위)
     function setCooldown(uint256 newCooldown) external onlyOwner {
         cooldown = newCooldown;
     }
 
-    function markReceived(address user, bool isAdmin) external onlyOwner {
-        FaucetInfo storage info = records[user];
-        if (isAdmin) {
-            info.isAdminReceive = true;
-        } else {
-            info.isReceive = true;
-        }
-        info.lastReceivedAt = block.timestamp;
+    /// @notice 특정 유저가 체인에서 수령 가능한지 확인
+    function isEligible(
+        address user,
+        string calldata chain
+    ) public view returns (bool) {
+        if (testingMode) return true;
+
+        uint256 last = lastReceivedAt[user][chain];
+        return block.timestamp >= last + cooldown;
     }
 
-    function getFaucetInfo(
-        address user
-    ) external view returns (FaucetInfo memory) {
-        return records[user];
+    /// @notice 마지막 수령 시간 확인
+    function getLastReceivedAt(
+        address user,
+        string calldata chain
+    ) external view returns (uint256) {
+        return lastReceivedAt[user][chain];
     }
 
-    function resetAll(address user) external onlyOwner {
-        delete records[user];
-    }
-
-    function setUserReceived(address user) external onlyOwner {
-        records[user].isReceive = true;
-        records[user].lastReceivedAt = block.timestamp;
-    }
-
-    function setAdminReceived(address user) external onlyOwner {
-        records[user].isAdminReceive = true;
-        records[user].lastReceivedAt = block.timestamp;
-    }
-
-    function reset(address user) external onlyOwner {
-        delete records[user];
-    }
-
-    function getStatus(address user) external view returns (bool, bool) {
-        FaucetInfo memory info = records[user];
-        return (info.isAdminReceive, info.isReceive);
-    }
-
-    function updateLastReceive(address user) external onlyOwner {
-        records[user].lastReceivedAt = block.timestamp;
-    }
-
-    function isEligible(address user) public view returns (bool) {
-        require(user != address(0), "Zero address not allowed");
-
-        if (testingMode) {
-            return true; // ✅ 테스트 모드에서는 무조건 통과
-        }
-
-        require(
-            records[user].lastReceivedAt + cooldown <= block.timestamp,
-            "Too soon to request again"
-        );
-        return true;
+    /// @notice 모든 기록 리셋 (관리자만 가능)
+    function reset(address user, string calldata chain) external onlyOwner {
+        lastReceivedAt[user][chain] = 0;
+        isAdminReceive[user] = false;
+        isReceive[user] = false;
     }
 }

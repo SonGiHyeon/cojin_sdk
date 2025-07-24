@@ -3,127 +3,157 @@
 import * as dotenv from 'dotenv';
 dotenv.config();
 
-import { Injectable } from '@nestjs/common'
-import { Contract, ethers } from 'ethers'; // ✅ Contract도 import
+import { Injectable } from '@nestjs/common';
+import { ethers } from 'ethers';
 import { ConfigService } from '@nestjs/config';
-import CJNTokenJson from '../../../sdk/contracts/CJNToken.json'
-import FaucetTrackerAbi from '../../../sdk/contracts/FaucetTracker.json'
-import { ERC20_ABI } from '../constants/erc20.abi'; // 경로 맞게 수정해줘
+import CJNTokenJson from '../../../sdk/contracts/CJNToken.json';
+import FaucetTrackerAbi from '../../src/contracts/FaucetTracker.json';
 
-const FAUCET_TRACKER_ADDRESS = process.env.FAUCET_TRACKER_CONTRACT as string;
-const CJNTOKEN_ADDRESS = process.env.CJNT_CONTRACT as string
-const SEPOLIA_RPC_URL = process.env.SEPOLIA_RPC_URL as string
-const PRIVATE_KEY = process.env.PRIVATE_KEY as string
+const CJNTOKEN_ADDRESS = process.env.CJNT_CONTRACT!;
+const SEPOLIA_RPC_URL = process.env.SEPOLIA_RPC_URL!;
+const KAIROS_RPC_URL = process.env.KAIROS_RPC_URL!;
+const PRIVATE_KEY = process.env.PRIVATE_KEY!;
+const KAIROS_PRIVATE_KEY = process.env.KAIROS_PRIVATE_KEY!;
+const FAUCET_TRACKER_CONTRACT_SEPOLIA = process.env.FAUCET_TRACKER_CONTRACT_SEPOLIA!;
+const FAUCET_TRACKER_CONTRACT_KAIROS = process.env.FAUCET_TRACKER_CONTRACT_KAIROS!;
+const COOLDOWN_SECONDS = 60 * 60 * 24;
 
 @Injectable()
 export class FaucetService {
-    constructor(private configService: ConfigService) { } // ✅ 주입
+    constructor(private configService: ConfigService) { }
 
-    async sendTestToken(chain: string, address: string): Promise<string> {
-        if (chain !== 'sepolia') throw new Error('Only sepolia is supported')
+    async sendCJNT(address: string): Promise<string> {
+        const provider = new ethers.JsonRpcProvider(SEPOLIA_RPC_URL);
+        const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
+        const contract = new ethers.Contract(CJNTOKEN_ADDRESS, CJNTokenJson.abi, wallet);
+        const tracker = new ethers.Contract(FAUCET_TRACKER_CONTRACT_SEPOLIA, FaucetTrackerAbi.abi, wallet);
 
-        console.log(`Send token to ${address} on ${chain}`)
+        const tx = await contract.transfer(address, ethers.parseUnits('100', 18));
+        await tx.wait();
 
-        const provider = new ethers.JsonRpcProvider(SEPOLIA_RPC_URL)
-        const wallet = new ethers.Wallet(PRIVATE_KEY, provider)
-        const contract = new ethers.Contract(CJNTOKEN_ADDRESS, CJNTokenJson.abi, wallet)
+        try {
+            await tracker.setUserReceived(address, 'sepolia');
+        } catch (e: any) {
+            console.error('❌ setUserReceived 실패:', e.message);
+        }
 
-        const tx = await contract.transfer(address, ethers.parseEther('0.1'))
-        await tx.wait()
-
-        console.log(`✅ Token sent! txHash: ${tx.hash}`)
-        return tx.hash
+        return tx.hash;
     }
 
     async sendNativeToken(address: string): Promise<string> {
-        const isEligible = await this.isEligibleForNative(address)
-        if (!isEligible) {
-            throw new Error('이미 토큰을 수령했거나, 아직 하루가 지나지 않았습니다.')
+        const now = Math.floor(Date.now() / 1000);
+        const last = await this.getLastReceivedAt(address, 'sepolia');
+        const remaining = last ? COOLDOWN_SECONDS - (now - last) : 0;
+
+        if (remaining > 0) {
+            throw new Error('ETH: 쿨다운 중입니다.');
         }
 
-        const wallet = new ethers.Wallet(PRIVATE_KEY, new ethers.JsonRpcProvider(SEPOLIA_RPC_URL))
+        const provider = new ethers.JsonRpcProvider(SEPOLIA_RPC_URL);
+        const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 
         const tx = await wallet.sendTransaction({
             to: address,
-            value: ethers.parseEther("0.01")
-        })
+            value: ethers.parseEther('0.01'),
+        });
+        await tx.wait();
 
-        await tx.wait()
+        const tracker = new ethers.Contract(FAUCET_TRACKER_CONTRACT_SEPOLIA, FaucetTrackerAbi.abi, wallet);
+        await tracker.setAdminReceived(address, 'sepolia');
 
-        // ✅ FaucetTracker에 수령 기록 남기기
-        const tracker = new ethers.Contract(FAUCET_TRACKER_ADDRESS, FaucetTrackerAbi.abi, wallet)
-        await tracker.updateLastReceive(address)
-
-        return tx.hash
+        return tx.hash;
     }
 
 
-    async isEligibleForNative(address: string): Promise<boolean> {
-        const provider = new ethers.JsonRpcProvider(SEPOLIA_RPC_URL)
-        const contract = new ethers.Contract(FAUCET_TRACKER_ADDRESS, FaucetTrackerAbi.abi, provider)
-        console.log('🔍 Calling isEligible with address:', address)
+    async sendKai(address: string): Promise<string> {
+        const now = Math.floor(Date.now() / 1000);
+        const last = await this.getLastReceivedAt(address, 'kairos');
+        const remaining = last ? COOLDOWN_SECONDS - (now - last) : 0;
 
-        try {
-            const eligible = await contract.isEligible(address)
-            console.log('✅ Eligible result:', eligible)
-            return eligible
-        } catch (error: any) {
-            console.error('❌ Error calling isEligible:', error.message || error)
-            console.error('🔧 Full error object:', error)
-            throw error
+        if (remaining > 0) {
+            throw new Error('KAI: 쿨다운 중입니다.');
         }
-    }
 
+        const provider = new ethers.JsonRpcProvider(KAIROS_RPC_URL);
+        const wallet = new ethers.Wallet(KAIROS_PRIVATE_KEY, provider);
+
+        const tx = await wallet.sendTransaction({
+            to: address,
+            value: ethers.parseEther('0.01'),
+        });
+        await tx.wait();
+
+        const tracker = new ethers.Contract(FAUCET_TRACKER_CONTRACT_KAIROS, FaucetTrackerAbi.abi, wallet);
+        try {
+            const tx2 = await tracker.setAdminReceived(address, 'kai');
+            await tx2.wait();
+        } catch (e) {
+            console.error('❌ setAdminReceived(kai) 실패:', e);
+        }
+
+        return tx.hash;
+    }
 
     async getCJNTBalance(address: string): Promise<number> {
         const provider = new ethers.JsonRpcProvider(SEPOLIA_RPC_URL);
         const contract = new ethers.Contract(CJNTOKEN_ADDRESS, CJNTokenJson.abi, provider);
-
         const balance = await contract.balanceOf(address);
         return Number(ethers.formatUnits(balance, 18));
     }
 
-    async checkCJNTBalance(userAddress: string): Promise<bigint> {
-        const cjntTokenAddress = this.configService.get<string>('CJNT_CONTRACT');
-        if (!cjntTokenAddress) {
-            throw new Error('CJNT_CONTRACT is not set in .env');
+    async getLastReceivedAt(address: string, chain: string): Promise<number | null> {
+        const isKai = chain === 'kai';
+        const rpcUrl = isKai ? KAIROS_RPC_URL : SEPOLIA_RPC_URL;
+        const contractAddress = isKai ? FAUCET_TRACKER_CONTRACT_KAIROS : FAUCET_TRACKER_CONTRACT_SEPOLIA;
+
+        console.log(`🔍 [getLastReceivedAt] chain: ${chain}`);
+        console.log(`   → Using RPC: ${rpcUrl}`);
+        console.log(`   → Using Tracker Address: ${contractAddress}`);
+
+        const provider = new ethers.JsonRpcProvider(rpcUrl);
+        const tracker = new ethers.Contract(contractAddress, FaucetTrackerAbi.abi, provider);
+
+        try {
+            const timestamp: bigint = await tracker.getLastReceivedAt(address, chain);
+            console.log(`✅ [getLastReceivedAt] result for ${address} on ${chain}: ${timestamp.toString()}`);
+
+            return timestamp === 0n ? null : Number(timestamp);
+        } catch (err) {
+            console.error(`❌ [getLastReceivedAt] ${chain} 호출 실패:`, err);
+            return null;
         }
-
-        const provider = new ethers.JsonRpcProvider(SEPOLIA_RPC_URL);
-        const contract = new ethers.Contract(cjntTokenAddress, ERC20_ABI, provider);
-        const balance: bigint = await contract.balanceOf(userAddress);
-
-        return balance;
     }
 
-    async sendCJNT(address: string): Promise<string> {
-        const provider = new ethers.JsonRpcProvider(SEPOLIA_RPC_URL)
-        const wallet = new ethers.Wallet(PRIVATE_KEY, provider)
-        const contract = new ethers.Contract(CJNTOKEN_ADDRESS, CJNTokenJson.abi, wallet)
 
-        const tx = await contract.transfer(address, ethers.parseUnits('100', 18))
-        await tx.wait()
+    async checkEligibility(address: string) {
+        const cjntBalance = await this.getCJNTBalance(address);
+        const hasEnough = cjntBalance >= 100;
 
-        console.log(`✅ CJNT 100 전송 완료: ${tx.hash}`)
-        return tx.hash
+        const [ethTime, kaiTime] = await Promise.all([
+            this.getLastReceivedAt(address, 'sepolia'),
+            this.getLastReceivedAt(address, 'kai'),
+        ]);
+
+        const now = Math.floor(Date.now() / 1000);
+
+        // 남은 시간 계산 (null이 아니면 쿨다운 중으로 간주)
+        const ethRemaining = ethTime !== null ? Math.max(COOLDOWN_SECONDS - (now - ethTime), 0) : null;
+        const kaiRemaining = kaiTime !== null ? Math.max(COOLDOWN_SECONDS - (now - kaiTime), 0) : null;
+
+        // eligibility 조건: CJNT ≥ 100 AND 아직 받은 적 없을 때
+        const ethEligible = hasEnough && ethRemaining === null;
+        const kaiEligible = hasEnough && kaiRemaining === null;
+
+        return {
+            ethEligible,
+            kaiEligible,
+            lastReceivedAt: { eth: ethTime, kai: kaiTime },
+            remainingTime: {
+                eth: ethEligible ? null : ethRemaining,
+                kai: kaiEligible ? null : kaiRemaining,
+            },
+        };
     }
 
-    async sendKai(address: string): Promise<string> {
-        const provider = new ethers.JsonRpcProvider(process.env.KLAYTN_RPC_URL!)
-        const wallet = new ethers.Wallet(process.env.KLAYTN_PRIVATE_KEY!, provider)
-
-        const tx = await wallet.sendTransaction({
-            to: address,
-            value: ethers.parseEther("0.01")  // 필요 시 변경 가능
-        })
-
-        const balance = await provider.getBalance(wallet.address)
-        console.log(`🔍 Wallet balance: ${ethers.formatEther(balance)} KAI`)
-
-
-        await tx.wait()
-        console.log(`✅ KAI 전송 완료! txHash: ${tx.hash}`)
-        return tx.hash
-    }
 
 }
