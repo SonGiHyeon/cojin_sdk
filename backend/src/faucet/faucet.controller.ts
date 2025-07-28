@@ -1,3 +1,5 @@
+// faucet.controller.ts
+
 import {
     Body,
     Controller,
@@ -63,7 +65,7 @@ export class FaucetController {
 
             if (!kaiEligible) {
                 console.warn(`[POST /faucet/request-kai] ❌ KAI eligibility false for ${address}`);
-                throw new BadRequestException('KAI는 이미 수령했거나, 아직 쿨다운 중입니다.');
+                throw new BadRequestException('KAIROS는 이미 수령했거나, 아직 쿨다운 중입니다.');
             }
 
             const txHash = await this.faucetService.sendKai(address);
@@ -72,7 +74,7 @@ export class FaucetController {
             console.error('[POST /faucet/request-kai] Error:', err);
             throw err instanceof BadRequestException
                 ? err
-                : new InternalServerErrorException(err.message || 'KAI 전송 실패');
+                : new InternalServerErrorException(err.message || 'KAIROS 전송 실패');
         }
     }
 }

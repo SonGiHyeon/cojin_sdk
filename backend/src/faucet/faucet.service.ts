@@ -1,5 +1,3 @@
-// faucet.service.ts
-
 import * as dotenv from 'dotenv';
 dotenv.config();
 
@@ -41,21 +39,12 @@ export class FaucetService {
     }
 
     async sendNativeToken(address: string): Promise<string> {
-        const now = Math.floor(Date.now() / 1000);
-        const last = await this.getLastReceivedAt(address, 'sepolia');
-        const remaining = last ? COOLDOWN_SECONDS - (now - last) : 0;
-
-        if (remaining > 0) {
-            throw new Error('ETH: 쿨다운 중입니다.');
-        }
+        await this.assertEligibility(address, 'sepolia');
 
         const provider = new ethers.JsonRpcProvider(SEPOLIA_RPC_URL);
         const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 
-        const tx = await wallet.sendTransaction({
-            to: address,
-            value: ethers.parseEther('0.01'),
-        });
+        const tx = await wallet.sendTransaction({ to: address, value: ethers.parseEther('0.01') });
         await tx.wait();
 
         const tracker = new ethers.Contract(FAUCET_TRACKER_CONTRACT_SEPOLIA, FaucetTrackerAbi.abi, wallet);
@@ -64,34 +53,34 @@ export class FaucetService {
         return tx.hash;
     }
 
-
     async sendKai(address: string): Promise<string> {
-        const now = Math.floor(Date.now() / 1000);
-        const last = await this.getLastReceivedAt(address, 'kairos');
-        const remaining = last ? COOLDOWN_SECONDS - (now - last) : 0;
-
-        if (remaining > 0) {
-            throw new Error('KAI: 쿨다운 중입니다.');
-        }
+        await this.assertEligibility(address, 'kai');
 
         const provider = new ethers.JsonRpcProvider(KAIROS_RPC_URL);
         const wallet = new ethers.Wallet(KAIROS_PRIVATE_KEY, provider);
 
-        const tx = await wallet.sendTransaction({
-            to: address,
-            value: ethers.parseEther('0.01'),
-        });
+        const tx = await wallet.sendTransaction({ to: address, value: ethers.parseEther('0.01') });
         await tx.wait();
 
         const tracker = new ethers.Contract(FAUCET_TRACKER_CONTRACT_KAIROS, FaucetTrackerAbi.abi, wallet);
-        try {
-            const tx2 = await tracker.setAdminReceived(address, 'kai');
-            await tx2.wait();
-        } catch (e) {
-            console.error('❌ setAdminReceived(kai) 실패:', e);
-        }
+        await tracker.setAdminReceived(address, 'kai');
 
         return tx.hash;
+    }
+
+    private async assertEligibility(address: string, chain: 'sepolia' | 'kai') {
+        const cjntBalance = await this.getCJNTBalance(address);
+        if (cjntBalance < 100) {
+            throw new Error(`${chain.toUpperCase()}: CJNT 보유량 부족.`);
+        }
+
+        const now = Math.floor(Date.now() / 1000);
+        const last = await this.getLastReceivedAt(address, chain);
+        const remaining = last ? COOLDOWN_SECONDS - (now - last) : 0;
+
+        if (remaining > 0) {
+            throw new Error(`${chain.toUpperCase()}: 쿨다운 중입니다.`);
+        }
     }
 
     async getCJNTBalance(address: string): Promise<number> {
@@ -116,7 +105,6 @@ export class FaucetService {
         try {
             const timestamp: bigint = await tracker.getLastReceivedAt(address, chain);
             console.log(`✅ [getLastReceivedAt] result for ${address} on ${chain}: ${timestamp.toString()}`);
-
             return timestamp === 0n ? null : Number(timestamp);
         } catch (err) {
             console.error(`❌ [getLastReceivedAt] ${chain} 호출 실패:`, err);
@@ -124,36 +112,40 @@ export class FaucetService {
         }
     }
 
-
-    async checkEligibility(address: string) {
-        const cjntBalance = await this.getCJNTBalance(address);
-        const hasEnough = cjntBalance >= 100;
-
-        const [ethTime, kaiTime] = await Promise.all([
+    async checkEligibility(address: string): Promise<{
+        ethEligible: boolean;
+        kaiEligible: boolean;
+        lastReceivedAt: { eth: number | null; kai: number | null };
+        remainingTime: { eth: number | null; kai: number | null };
+        cjntBalance: number;
+    }> {
+        const now = Math.floor(Date.now() / 1000);
+        const [ethLast, kaiLast, cjntBalance] = await Promise.all([
             this.getLastReceivedAt(address, 'sepolia'),
             this.getLastReceivedAt(address, 'kai'),
+            this.getCJNTBalance(address),
         ]);
 
-        const now = Math.floor(Date.now() / 1000);
+        const calcRemaining = (last: number | null) => (last ? Math.max(COOLDOWN_SECONDS - (now - last), 0) : null);
 
-        // 남은 시간 계산 (null이 아니면 쿨다운 중으로 간주)
-        const ethRemaining = ethTime !== null ? Math.max(COOLDOWN_SECONDS - (now - ethTime), 0) : null;
-        const kaiRemaining = kaiTime !== null ? Math.max(COOLDOWN_SECONDS - (now - kaiTime), 0) : null;
+        const ethRemaining = calcRemaining(ethLast);
+        const kaiRemaining = calcRemaining(kaiLast);
 
-        // eligibility 조건: CJNT ≥ 100 AND 아직 받은 적 없을 때
-        const ethEligible = hasEnough && ethRemaining === null;
-        const kaiEligible = hasEnough && kaiRemaining === null;
+        const ethEligible = (ethRemaining === null || ethRemaining <= 0) && cjntBalance >= 100;
+        const kaiEligible = (kaiRemaining === null || kaiRemaining <= 0) && cjntBalance >= 100;
 
         return {
             ethEligible,
             kaiEligible,
-            lastReceivedAt: { eth: ethTime, kai: kaiTime },
-            remainingTime: {
-                eth: ethEligible ? null : ethRemaining,
-                kai: kaiEligible ? null : kaiRemaining,
+            lastReceivedAt: {
+                eth: ethLast ?? null,
+                kai: kaiLast ?? null,
             },
+            remainingTime: {
+                eth: ethRemaining && ethRemaining > 0 ? ethRemaining : null,
+                kai: kaiRemaining && kaiRemaining > 0 ? kaiRemaining : null,
+            },
+            cjntBalance,
         };
     }
-
-
 }
